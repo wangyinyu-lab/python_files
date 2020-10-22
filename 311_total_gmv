@@ -1,0 +1,115 @@
+from hkydd import HykDing
+from hkydd import sql_odps
+from hkydd import before_n_day,before_n_day_odps,month_fst_day,remove_blank
+import datetime
+import platform
+import time
+import hmac
+import hashlib
+import base64
+import json
+import urllib.parse
+import urllib.request
+from pandas.plotting import  table
+import matplotlib.pyplot as plt
+import dingtalkchatbot.chatbot as cb
+test_webhook =  "https://oapi.dingtalk.com/robot/send?access_token=c0cda20da7f6fcb1ee3501f4bfaea2c7ce8fd88459ff19a12c1d70aa0dd73dcb"
+data_dd2 = HykDing(webhook=test_webhook,subject='店主销售数据'.format(before_n_day(1)))
+gmv_sql ='''
+select distinct a.用户名称,b.实付金额,a.下单人数,a.退款订单数 from
+(select a.*,b.退款订单数 from 
+(select c.distributor_name as 用户名称,sum(total_price)/100 as 实付金额,count(distinct b.c_user_id) as 下单人数
+ from wxhc_settle a
+left join dwd_sub_biz_order b on a.sub_biz_order_id=b.id
+left join wxhc_distributor c on a.c_user_id=c.cuser_id
+where a.type in (30101,30102) and b.pt={biz_date} 
+and b.order_status in (2,3,4,8)
+and b.refund_status=0 
+and b.from_come=3
+and b.biz_type = 3
+and case when b.inviter_c_user_id > 0 then b.inviter_c_user_id else b.c_user_id end=311
+group by c.distributor_name
+) a
+left join 
+(
+select c.distributor_name as 用户名称,count(distinct b.id) as 退款订单数 from  wxhc_settle a
+left join (
+select  o.id,o.inviter_c_user_id,o.c_user_id
+from  dwd_sub_biz_order o
+LEFT JOIN    wxhc_work_order_ref_order woro on woro.sub_biz_order_id = o.id
+left join  wxhc_work_order wo on woro.work_order_num = wo.work_order_num 
+where order_status in (2,3,4,8)
+and o.biz_type = 3
+and o.from_come=3
+and to_char(wo.gmt_create,'yyyymmdd')>={biz_date} and to_char(wo.gmt_create,'yyyymmdd')<'{biz_date_0}'
+) b on a.sub_biz_order_id=b.id
+left join wxhc_distributor c on a.c_user_id=c.cuser_id
+where a.type in (30101,30102) and 
+ case when b.inviter_c_user_id > 0 then b.inviter_c_user_id else b.c_user_id end=311
+group by c.distributor_name)  b on a.用户名称=b.用户名称
+
+union all
+
+select a.*,b.退款订单数 from 
+(select c.distributor_name as 用户名称,sum(total_price)/100 as 实付金额,count(distinct b.c_user_id) as 下单人数
+ from wxhc_settle a
+left join dwd_sub_biz_order b on a.sub_biz_order_id=b.id
+left join wxhc_distributor c on a.c_user_id=c.cuser_id
+where a.type in (30101,30102) and b.pt={biz_date} 
+and b.order_status in (2,3,4,8)
+and b.refund_status=0 
+and b.from_come=3
+and b.biz_type = 3
+and case when b.inviter_c_user_id > 0 then b.inviter_c_user_id else b.c_user_id end=311
+group by c.distributor_name
+) a
+right join 
+(
+select c.distributor_name as 用户名称,count(distinct b.id) as 退款订单数 from  wxhc_settle a
+left join (
+select  o.id,o.inviter_c_user_id,o.c_user_id
+from  dwd_sub_biz_order o
+LEFT JOIN    wxhc_work_order_ref_order woro on woro.sub_biz_order_id = o.id
+left join  wxhc_work_order wo on woro.work_order_num = wo.work_order_num 
+where order_status in (2,3,4,8)
+and o.biz_type = 3
+and o.from_come=3
+and to_char(wo.gmt_create,'yyyymmdd')>={biz_date} and to_char(wo.gmt_create,'yyyymmdd')<'{biz_date_0}'
+) b on a.sub_biz_order_id=b.id
+left join wxhc_distributor c on a.c_user_id=c.cuser_id
+where a.type in (30101,30102) and 
+ case when b.inviter_c_user_id > 0 then b.inviter_c_user_id else b.c_user_id end=311
+group by c.distributor_name)  b on a.用户名称=b.用户名称) a
+left join 
+(select b.distributor_name,sum(a.sale_amount_turnover -a.sale_refund_amount_turnover)/100 as  实付金额
+from wxhc_shop_days_statistics a
+left join wxhc_distributor b on a.c_user_id=b.cuser_id
+where (b.inviter_cuser_id=311 or b.cuser_id=311)
+and a.pt={biz_date} and a.biz_type=3
+group by b.distributor_name) b on a.用户名称=b.distributor_name
+order by b.实付金额 desc
+'''.format(biz_date =  before_n_day_odps(1),biz_date_0=before_n_day_odps(0))
+gmv_df = sql_odps(gmv_sql)
+data_dd2.add_data(df= gmv_df,title='',sep=':  ')
+data_dd2.send_message()
+data_dd3 = HykDing(webhook=test_webhook,subject='店主主页访问数据'.format(before_n_day(1)))
+gmv_sql3 ='''
+select a.behavior_date,b.shop_name,a.访问次数,a.访问人数
+from (
+    SELECT behavior_date,GET_JSON_OBJECT(features,'$.shopId') as shopid,count(1) as 访问次数,
+count(distinct user_id) as 访问人数
+from webuy_logana.user_behavior_online 
+where behavior_date >= {biz_date}
+and behavior_date <= {biz_date_0}
+and behavior_type = 'pageView'
+and from_page_area='shopEntry'
+--and GET_JSON_OBJECT(features,'$.agentId') is null
+group by behavior_date,GET_JSON_OBJECT(features,'$.shopId')
+having shopid is not null) a
+left join shop b on a.shopid=b.shop_id
+where b.owner_id=311
+'''.format(biz_date =  before_n_day_odps(1),biz_date_0=before_n_day_odps(0))
+gmv_df3 = sql_odps(gmv_sql3)
+robot = cb.DingtalkChatbot(webhook=test_webhook)
+robot.send_markdown(title='店主主页访问数据', 
+text= "# 小返特卖 大牌清仓店主主页访问人数:"+str(gmv_df3['访问人数'][0]))
